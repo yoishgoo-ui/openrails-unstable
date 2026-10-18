@@ -25,6 +25,7 @@ using System.Diagnostics;
 using Microsoft.Xna.Framework;
 using ORTS.Common;
 using Orts.Parsers.Msts;
+using static Orts.Simulation.RollingStocks.MSTSLocomotive;
 using static Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions.Axle;
 
 namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
@@ -236,6 +237,37 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
             }
         }
 
+        /// <summary>
+        /// Get most restrictive slip control force fraction
+        /// </summary>
+        public float SlipControlFraction
+        {
+            get
+            {
+                float slipControl = 1.0f;
+                foreach (var axle in AxleList)
+                {
+                    if (axle.SlipControlFraction < slipControl) slipControl = axle.SlipControlFraction;
+                }
+                return slipControl;
+            }
+        }
+        /// <summary>
+        /// Get total drive force limitation as imposed by slip control
+        /// </summary>
+        public float SlipControlForceN
+        {
+            get
+            {
+                float forceN = 0;
+                foreach (var axle in AxleList)
+                {
+                    forceN += axle.SlipControlForceN;
+                }
+                return forceN;
+            }
+        }
+
         public int NumOfSubstepsPS
         {
             get
@@ -388,8 +420,8 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
                     {
                         // Diesel and electric locomotives have a threshold time set
                         // just long enough to ignore artificial slip indications
-                        axle.WheelSlipThresholdTimeS = 0.2f;
-                        axle.WheelSlipWarningThresholdTimeS = 0.2f;
+                        axle.WheelSlipThresholdTimeS = 0.25f;
+                        axle.WheelSlipWarningThresholdTimeS = 0.25f;
                     }
                 }
                 if (axle.DriveType == AxleDriveType.NotDriven)
@@ -493,6 +525,73 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
             }
             PreviousUsePolachAdhesion = UsePolachAdhesion;
         }
+
+        /// <summary>
+        /// Sets the total axles drive force to the given tractive effort value,
+        /// automatically correcting for direction of travel, presence of motors, etc.
+        /// Force should be positive if in the direction of the reverser.
+        /// </summary>
+        /// <param name="forceN">Traction force to be applied to axles, positive if in reverser direction.</param>
+        public void ApplyTractionForce(float forceN)
+        {
+            foreach (Axle axle in AxleList)
+                axle.ApplyTractionForce(forceN * axle.TractiveForceFraction);
+        }
+
+        /// <summary>
+        /// Sets the total axles drive force to the given dynamic brake effort value,
+        /// automatically correcting for direction of travel, presence of motors, etc.
+        /// Force should be positive if against the direction of motion.
+        /// </summary>
+        /// <param name="forceN">Dynamic brake force to be applied to axles, positive if braking.</param>
+        public void ApplyDynamicBrakeForce(float forceN)
+        {
+            foreach (Axle axle in AxleList)
+                axle.ApplyDynamicBrakeForce(forceN * axle.TractiveForceFraction);
+        }
+
+        /// <summary>
+        /// Sets the total axles drive force to the given value,
+        /// automatically correcting for presence of motors.
+        /// Force should be positive if in the direction the locomotive is facing,
+        /// negative if against the direction the locomotive is facing.
+        /// </summary>
+        /// <param name="forceN">Drive force to be applied to axles, positive if forward.</param>
+        public void SetDriveForce(float forceN)
+        {
+            foreach (Axle axle in AxleList)
+                axle.SetDriveForce(forceN * axle.TractiveForceFraction);
+        }
+
+        /// <summary>
+        /// Updates the behavior of the wheel slip control system on each of the locomotive's axles.
+        /// The wheel slip control system, depending on the style equipped, influences the locomotive control
+        /// system to reduce tractive effort/dynamic brake effort demand in order to control wheel slip.
+        /// Returns the tractive effort/dynamic brake effort demanded by the wheel slip control system.
+        /// </summary>
+        /// <param name="targetForceN">The tractive effort the locomotive is attempting to output, without considering slip control.</param>
+        /// <param name="slipSystem">The type of slip control system used by the locomotive.</param>
+        /// <param name="elapsedClockSeconds">Simulation delta time.</param>
+        /// <param name="useRampRates">(Optional) true if the locomotive has ramp rates defined to control rate of force change.</param>
+        /// <returns>The tractive effort the locomotive should attempt to output after considering slip control.</returns>
+        public float UpdateSlipControl(float targetForceN, SlipControlType slipSystem, float elapsedClockSeconds, bool useRampRates = false)
+        {
+            // Keep track of the most limiting slip force
+            float slipControlForceN = targetForceN;
+
+            foreach (Axle axle in AxleList)
+            {
+                float axleSlipControlForceN = axle.UpdateSlipControl(targetForceN * axle.TractiveForceFraction, slipSystem, elapsedClockSeconds, useRampRates);
+                // Convert this axle's individual force limit to equivalent locomotive force limit
+                axleSlipControlForceN /= axle.TractiveForceFraction;
+
+                if (Math.Abs(axleSlipControlForceN) < Math.Abs(slipControlForceN))
+                    slipControlForceN = axleSlipControlForceN;
+            }
+
+            return slipControlForceN;
+        }
+
         public List<Axle>.Enumerator GetEnumerator()
         {
             return AxleList.GetEnumerator();
@@ -622,6 +721,18 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         /// Contribution of this axle to the total tractive force
         /// </summary>
         public float TractiveForceFraction;
+
+        /// <summary>
+        /// The relative amount of force this axle is allowed by
+        /// the slip control system to output
+        /// </summary>
+        public float SlipControlFraction = 1.0f;
+
+        /// <summary>
+        /// The absolute amount of drive force this axle is allowed by
+        /// the slip control system to output
+        /// </summary>
+        public float SlipControlForceN;
         /// <summary>
         /// Contribution of this axle to the total brake force
         /// </summary>
@@ -861,6 +972,11 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         public double AxleSpeedMpS { get; set; }
 
         /// <summary>
+        /// Axle speed value from the previous iteration
+        /// </summary>
+        public double PreviousAxleSpeedMpS { get; set; }
+
+        /// <summary>
         /// Axle angular position in radians
         /// </summary>
         public double AxlePositionRad { get; private set; }
@@ -910,40 +1026,63 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         /// - its value is computed as a maximum of slip function
         ///   maximum can be found as a derivation f'(dV) = 0
         /// </summary>
-        public float WheelSlipThresholdMpS;
+        public float WheelSlipThresholdMpS = 0.025f;
+
+        /// <summary>
+        /// Determines the maximum axle adhesion (MaximumWheelAdhesion) at the current conditions,
+        /// as well as the slip speed that causes this level of adhesion (WheelSlipThresholdMpS)
+        /// </summary>
         public void ComputeWheelSlipThresholdMpS()
         {
-            // Bisection algorithm. We assume adhesion maximum is between 0 (0.005) and 4 m/s
-            double a = 0.005f;
-            double b = 4;
+            // Goal: Determine the slip speed that causes the largest adhesion
+            // Not feasible to determine analytically, determine iteratively
+            // Bisection algorithm. We assume adhesion maximum is between 0.025 m/s and slightly above the previous slip speed
+            double lowerSlipMpS = 0.025;
+            double upperSlipMpS = Math.Max(WheelSlipThresholdMpS, lowerSlipMpS) + lowerSlipMpS;
+
+            double lowerAdhesion = SlipCharacteristicsPolach(lowerSlipMpS);
+            double upperAdhesion = SlipCharacteristicsPolach(upperSlipMpS);
             // We have to find the zero of the derivative of adhesion curve
             // i.e. the point where slope changes from positive (adhesion region)
             // to negative (slip region)
             double dx = 0.001;
-            double fa = SlipCharacteristicsPolach(a + dx) - SlipCharacteristicsPolach(a);
-            double fb = SlipCharacteristicsPolach(b + dx) - SlipCharacteristicsPolach(b);
+            double fa = SlipCharacteristicsPolach(lowerSlipMpS + dx) - lowerAdhesion;
+            double fb = SlipCharacteristicsPolach(upperSlipMpS + dx) - upperAdhesion;
 
             if (fa * fb > 0)
             {
                 // If sign does not change, bisection fails
-                WheelSlipThresholdMpS = MpS.FromKpH(0.1f);
+                if (fa > 0) // Max adhesion is somewhere above the upper threshold
+                {
+                    MaximumWheelAdhesion = (float)upperAdhesion;
+                    WheelSlipThresholdMpS = (float)upperSlipMpS;
+                }
+                else // Max adhesion is somewhere below the lower threshold
+                {
+                    MaximumWheelAdhesion = (float)lowerAdhesion;
+                    WheelSlipThresholdMpS = (float)lowerSlipMpS;
+                }
                 return;
             }
-            while (Math.Abs(b - a) > MpS.FromKpH(0.1f))
+            while (Math.Abs(upperSlipMpS - lowerSlipMpS) > 0.005)
             {
-                double c = (a + b) / 2;
-                double fc = SlipCharacteristicsPolach(c + dx) - SlipCharacteristicsPolach(c);
+                double middleSlipMpS = (lowerSlipMpS + upperSlipMpS) / 2;
+                double middleAdhesion = SlipCharacteristicsPolach(middleSlipMpS);
+                double fc = SlipCharacteristicsPolach(middleSlipMpS + dx) - middleAdhesion;
                 if (fa * fc > 0)
                 {
-                    a = c;
+                    lowerAdhesion = middleAdhesion;
+                    lowerSlipMpS = middleSlipMpS;
                     fa = fc;
                 }
                 else
                 {
-                    b = c;
+                    upperAdhesion = middleAdhesion;
+                    upperSlipMpS = middleSlipMpS;
                 }
             }
-            WheelSlipThresholdMpS = (float)Math.Max((a + b) / 2, MpS.FromKpH(0.1f));
+            MaximumWheelAdhesion = (float)((lowerAdhesion + upperAdhesion) / 2);
+            WheelSlipThresholdMpS = (float)((lowerSlipMpS + upperSlipMpS) / 2);
         }
 
         /// <summary>
@@ -1012,7 +1151,7 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         /// </summary>
         protected float slipDerivationPercentpS;
         /// <summary>
-        /// Relativ slip speed from previous iteration
+        /// Relative slip speed from previous iteration
         /// </summary>
         protected float PreviousSlipPercent;
         /// <summary>
@@ -1138,6 +1277,7 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         /// <param name="inf">The save stream to read from.</param>
         public void Restore(BinaryReader inf)
         {
+            PreviousAxleSpeedMpS = inf.ReadDouble();
             PreviousSlipPercent = inf.ReadSingle();
             PreviousSlipSpeedMpS = inf.ReadSingle();
             AxleForceN = inf.ReadSingle();
@@ -1152,6 +1292,7 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         /// <param name="outf">The save stream to write to.</param>
         public void Save(BinaryWriter outf)
         {
+            outf.Write(PreviousAxleSpeedMpS);
             outf.Write(PreviousSlipPercent);
             outf.Write(PreviousSlipSpeedMpS);
             outf.Write(AxleForceN);
@@ -1380,7 +1521,6 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
                 axleStaticForceN = AxleGradientForceN * SlipCharacteristicsPolach(0);
                 ComputeWheelSlipThresholdMpS();
                 WheelAdhesion = (float)SlipCharacteristicsPolach(SlipSpeedMpS);
-                MaximumWheelAdhesion = (float)SlipCharacteristicsPolach(WheelSlipThresholdMpS);
 
 #if DEBUG_ADHESION
                 if (count < 6 && count++ == 5)
@@ -1424,6 +1564,8 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
 #endif
 
             motor?.Update(elapsedSeconds);
+
+            PreviousAxleSpeedMpS = AxleSpeedMpS;
 
             if (advancedAdhesion && !IsRackRailwayOperational)
             {
@@ -1580,6 +1722,239 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
             AxleForceN = axleOutForceN;
         }
 
+        /// <summary>
+        /// Sets the axle drive force to the given tractive effort value,
+        /// automatically correcting for direction of travel, presence of motors, etc.
+        /// Force should be positive if in the direction of the reverser.
+        /// </summary>
+        /// <param name="forceN">Traction force to be applied to this axle, positive if in reverser direction.</param>
+        public void ApplyTractionForce(float forceN)
+        {
+            // Locomotives in reverse gear apply force in reverse
+            if (Car.Direction == Direction.Reverse)
+                forceN *= -1;
+
+            SetDriveForce(forceN);
+        }
+
+        /// <summary>
+        /// Sets the axle drive force to the given dynamic brake effort value,
+        /// automatically correcting for direction of travel, presence of motors, etc.
+        /// Force should be positive if against the direction of motion.
+        /// </summary>
+        /// <param name="forceN">Dynamic brake force to be applied to this axle, positive if braking.</param>
+        public void ApplyDynamicBrakeForce(float forceN)
+        {
+            // Locomotives moving forward apply dynamic brake force in reverse
+            if (AxleSpeedMpS > 0)
+                forceN *= -1;
+
+            SetDriveForce(forceN);
+        }
+
+        /// <summary>
+        /// Sets the axle drive force to the given value,
+        /// automatically correcting for presence of motors.
+        /// Force should be positive if in the direction the locomotive is facing,
+        /// negative if against the direction the locomotive is facing.
+        /// </summary>
+        /// <param name="forceN">Drive force to be applied to this axle, positive if forward.</param>
+        public void SetDriveForce(float forceN)
+        {
+            if (motor != null && motor is InductionMotor inductionMotor)
+            {
+                // Don't set force directly when motor is used
+                inductionMotor.TargetForceN = forceN;
+            }
+            else
+            {
+                DriveForceN = forceN;
+            }
+        }
+
+        /// <summary>
+        /// Updates the behavior of the wheel slip control system on this axle.
+        /// The wheel slip control system, depending on the style equipped, influences the locomotive control
+        /// system to reduce tractive effort/dynamic brake effort demand in order to control wheel slip.
+        /// Returns the tractive effort/dynamic brake effort demanded by the wheel slip control system.
+        /// </summary>
+        /// <param name="targetForceN">The tractive effort this axle is attempting to output, without considering slip control.</param>
+        /// <param name="slipSystem">The type of slip control system used by the locomotive.</param>
+        /// <param name="elapsedClockSeconds">Simulation delta time.</param>
+        /// <param name="useRampRates">(Optional) true if the locomotive has ramp rates defined to control rate of force change.</param>
+        /// <returns>The tractive effort this axle should attempt to output after considering slip control.</returns>
+        public float UpdateSlipControl(float targetForceN, SlipControlType slipSystem, float elapsedClockSeconds, bool useRampRates = false)
+        {
+            if (slipSystem == SlipControlType.Unknown || slipSystem == SlipControlType.None)
+            {
+                // No slip control, do not limit the target tractive effort
+                return SlipControlForceN = targetForceN;
+            }
+
+            float forceRatio = DriveForceN / targetForceN;
+
+            if (slipSystem == SlipControlType.ReduceForce || slipSystem == SlipControlType.Full)
+            {
+                // Shared behavior for both standard and fully capable slip control
+                // Reduces tractive effort only after slip has actually happened
+                if (!HuDIsWheelSlip && SlipControlFraction < 1.0f)
+                {
+                    if (useRampRates)
+                    {
+                        // Speed of effort restoration will be controlled by ramp rates
+                        SlipControlFraction = 1.0f;
+                    }
+                    else
+                    {
+                        // No ramp rates defined, use default behavior
+                        // If not slipping, gradually increase effort limit back to 100% over 10 seconds
+                        SlipControlFraction += elapsedClockSeconds / 10.0f;
+                        if (SlipControlFraction > 1.0f)
+                            SlipControlFraction = 1.0f;
+                    }
+                }
+                else if (HuDIsWheelSlip && SlipControlFraction > 0.0f)
+                {
+                    // Reduce target force to mitigate wheel slip
+                    if (useRampRates)
+                    {
+                        // Speed of effort reduction will be controlled by ramp rates
+                        SlipControlFraction = 0.0f;
+                    }
+                    else
+                    {
+                        // No ramp rates defined, use default behavior
+                        // Immediately set effort reduction to reduce target force to the current force
+                        if (SlipControlFraction > forceRatio)
+                            SlipControlFraction = forceRatio;
+                        // If slipping, quickly reduce effort limit toward 0% over 1 second
+                        SlipControlFraction -= elapsedClockSeconds / 1.0f;
+                        if (SlipControlFraction < 0.0f)
+                            SlipControlFraction = 0.0f;
+                    }
+                }
+
+                if (slipSystem == SlipControlType.Full)
+                {
+                    // Fully capable slip control (creep control)
+                    // In addition to standard behavior, directly overrides the target tractive effort
+                    // by limiting target force to the limit of adhesion
+                    float adhesionLimitN = MaximumWheelAdhesion * AxleGradientForceN;
+
+                    // If ramp rates are defined, more precise creep control can be employed
+                    if (useRampRates)
+                    {
+                        // Increase adhesion limit (limited to +10%) if below 100% slip, reduce if above, to search for perfect wheel creep
+                        // Limit drops to 0 at 110% slip, actual force will be controlled by ramp rates
+                        adhesionLimitN *= MathHelper.Clamp(1.0f - (SlipSpeedPercent - 100) / 10.0f, 0.0f, 1.1f);
+                    }
+
+                    // Consider that target force may be negative, sign of adhesion limit should match sign of target force
+                    if (Math.Abs(targetForceN) > Math.Abs(adhesionLimitN))
+                        targetForceN = Math.Abs(adhesionLimitN) * Math.Sign(targetForceN);
+                }
+            }
+            else if (slipSystem == SlipControlType.CutPower)
+            {
+                // Rudimentary slip control
+                // Completely eliminates tractive effort after slip happens
+                // and only restores effort after resetting throttle
+                if (!HuDIsWheelSlip && ((Car.ThrottlePercent == 0.0f && Car.DynamicBrakePercent < 0.0f) || SlipControlFraction > 0.0f))
+                {
+                    if (useRampRates)
+                    {
+                        // Speed of effort restoration will be controlled by ramp rates
+                        SlipControlFraction = 1.0f;
+                    }
+                    else
+                    {
+                        // No ramp rates defined, use default behavior
+                        // gradually increase effort limit back to 100% over 10 seconds
+                        SlipControlFraction += elapsedClockSeconds / 10.0f;
+                        if (SlipControlFraction > 1.0f)
+                            SlipControlFraction = 1.0f;
+                    }
+                }
+                else if (HuDIsWheelSlip && SlipControlFraction > 0.0f)
+                {
+                    // If slipping, immediately reduce effort limit to 0%
+                    SlipControlFraction = 0.0f;
+                }
+            }
+            // Limit target force using the smallest value of SlipEffortLimit
+            return SlipControlForceN = targetForceN * SlipControlFraction;
+        }
+
+        /// <summary>
+        /// Changes an axle force from its current value to a target value, with the rate of change in the force
+        /// and the rate of change of the power of the force limited by given rates of change.
+        /// </summary>
+        /// <param name="forceN">Reference to the force to update</param>
+        /// <param name="elapsedClockSeconds">The simulation time step</param>
+        /// <param name="targetForceN">The target force that the drive force should be changed to</param>
+        /// <param name="maxForceN">The absolute maximum amount of force currently allowed</param>
+        /// <param name="rampUpNpS">The (optional) maximum rate of force increase from the locomotive</param>
+        /// <param name="rampDownNpS">The (optional) maximum rate of force decrease from the locomotive</param>
+        /// <param name="rampZeroNpS">The (optional) maximum rate of force decrease from the locomotive when <paramref name="targetForceN"/> is zero</param>
+        /// <param name="rampUpWpS">The (optional) maximum rate of power increase from the locomotive</param>
+        /// <param name="rampDownWpS">The (optional) maximum rate of power decrease from the locomotive</param>
+        /// <param name="rampZeroWpS">The (optional) maximum rate of power decrease from the locomotive when <paramref name="targetForceN"/> is zero</param>
+        public void UpdateForceWithRamp(ref float forceN, float elapsedClockSeconds, float targetForceN, float maxForceN,
+            float rampUpNpS = 0, float rampDownNpS = 0, float rampZeroNpS = 0,
+            float rampUpWpS = 0, float rampDownWpS = 0, float rampZeroWpS = 0)
+        {
+            // Limit magnitude of current force and target force to the magnitude of the maximum force
+            // Forces may be negative, need to consider magnitudes to properly handle negative forces
+            if (Math.Abs(targetForceN) > Math.Abs(maxForceN)) targetForceN = Math.Abs(maxForceN) * Math.Sign(targetForceN);
+            if (Math.Abs(forceN) > Math.Abs(maxForceN)) forceN = Math.Abs(maxForceN) * Math.Sign(forceN);
+            // If target has a different sign from current force, we must cross (or exactly reach) 0 force
+            bool toZero = Math.Sign(forceN) != Math.Sign(targetForceN);
+
+            // Consider influence of power rate of change
+            if (AxleSpeedMpS != 0)
+            {
+                float powerW = forceN * (float)PreviousAxleSpeedMpS;
+                float targetPowerW = targetForceN * (float)AxleSpeedMpS;
+
+                // If current power is negative, ramp rate behavior needs to be flipped
+                // Ie: Use the ramp "up" if power is positive and increasing, or negative and decreasing (getting more negative)
+                bool powerUp = (targetPowerW > powerW) ^ (powerW < 0);
+                float rampW = powerUp ? rampUpWpS : toZero ? rampZeroWpS : rampDownWpS;
+
+                // If no power ramp rate was given, then skip smooth power changes (force ramp rates will be used instead)
+                if (rampW > 0)
+                {
+                    // Ramp rates are specified at the locomotive level, convert to axle level by multiplying by force fraction
+                    rampW *= elapsedClockSeconds * TractiveForceFraction;
+
+                    if (targetPowerW < powerW) // Power needs to decrease (get less positive, or more negative)
+                        targetPowerW = Math.Max(powerW - rampW, targetPowerW);
+                    else if (targetPowerW > powerW) // Power needs to increase (get more positive, or less negative)
+                        targetPowerW = Math.Min(powerW + rampW, targetPowerW);
+                    // Recalculate target force accounting for power ramp
+                    targetForceN = targetPowerW / (float)AxleSpeedMpS;
+                }
+            }
+            // If current force is negative, ramp rate behavior needs to be flipped
+            // Ie: Use the ramp "up" if force is positive and increasing, or negative and decreasing (getting more negative)
+            bool rampUp = (targetForceN > forceN) ^ (forceN < 0);
+            float rampN = rampUp ? rampUpNpS : toZero ? rampZeroNpS : rampDownNpS;
+
+            // Finally, update actual force value
+            if (rampN > 0)
+            {
+                // Ramp rates are specified at the locomotive level, convert to axle level by multiplying by force fraction
+                rampN *= elapsedClockSeconds * TractiveForceFraction;
+
+                if (targetForceN < forceN) // Force needs to decrease (get less positive, or more negative)
+                    forceN = Math.Max(forceN - rampN, targetForceN);
+                else if (targetForceN > forceN) // Force needs to increase (get more positive, or less negative)
+                    forceN = Math.Min(forceN + rampN, targetForceN);
+            }
+            else // No ramp rate given, immediately update force
+                forceN = targetForceN;
+        }
+
         class PolachCalculator
         {
             Axle Axle;
@@ -1720,7 +2095,6 @@ namespace Orts.Simulation.RollingStocks.SubSystems.PowerTransmissions
         /// 
         /// </summary>
         /// <param name="slipSpeedMpS">Difference between train speed and wheel speed</param>
-        /// <param name="speedMpS">Current speed</param>
         /// <returns>Relative force transmitted to the rail</returns>
         public double SlipCharacteristicsPolach(double slipSpeedMpS)
         {
