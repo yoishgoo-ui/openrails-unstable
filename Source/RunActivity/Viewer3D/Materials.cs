@@ -791,6 +791,14 @@ namespace Orts.Viewer3D
             SortingKey &= ~0xFFFFUL;
             SortingKey |= (ulong)id & 0xFFFF;
         }
+
+        // Wywołaj po podmianie Texture2D wewnątrz instancji materiału
+        internal void RefreshSortingKey(Texture2D texture)
+        {
+            // Zaktualizuj identyfikator tekstury, a następnie identyfikator materiału
+            SetSortingTextureId(texture);
+            SetSortingMaterialId(this);
+        }
     }
 
     public class EmptyMaterial : Material

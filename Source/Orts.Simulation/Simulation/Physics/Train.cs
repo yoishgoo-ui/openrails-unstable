@@ -81,6 +81,9 @@ namespace Orts.Simulation.Physics
         public List<List<TrainCar>> LocoGroups = new List<List<TrainCar>>();
         public int Number;
         public string Name;
+        public string DestinationStationName { get; set; } = string.Empty;
+        public string LineNumber { get; set; } = string.Empty;
+
         public string TcsParametersFileName;
         public static int TotalNumber = 1; // start at 1 (0 is reserved for player train)
         public TrainCar FirstCar

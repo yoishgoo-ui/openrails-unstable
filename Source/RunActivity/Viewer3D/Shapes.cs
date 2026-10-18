@@ -272,9 +272,21 @@ namespace Orts.Viewer3D
     /// </summary>
     public class PoseableShape : StaticShape
     {
+        readonly Dictionary<ShapePrimitive, Material> MaterialOverrides = new Dictionary<ShapePrimitive, Material>();
+
         public Matrix[] XNAMatrices = new Matrix[0];  // the positions of the subobjects
 
         public readonly int[] Hierarchy;
+
+        public void SetMaterialOverride(ShapePrimitive primitive, Material material)
+        {
+            if (primitive == null)
+                throw new ArgumentNullException(nameof(primitive));
+            if (material == null)
+                throw new ArgumentNullException(nameof(material));
+
+            MaterialOverrides[primitive] = material;
+        }
 
         public PoseableShape(Viewer viewer, string path, WorldPosition initialPosition, ShapeFlags flags)
             : base(viewer, path, initialPosition, flags)
@@ -290,7 +302,7 @@ namespace Orts.Viewer3D
                 if (path != null && path != "Empty")
                 {
                     string location = path;
-                    if (path != null && path.Contains('\0'))
+                    if (path.Contains('\0'))
                         location = path.Split('\0')[0];
 
                     Trace.TraceWarning("Couldn't load shape {0} file may be corrupt", location);
@@ -309,12 +321,20 @@ namespace Orts.Viewer3D
 
         public override void PrepareFrame(RenderFrame frame, ElapsedTime elapsedTime)
         {
-            SharedShape.PrepareFrame(frame, Location, XNAMatrices, Flags);
+            SharedShape.PrepareFrame(frame, Location, XNAMatrices, null, Flags, null, MaterialOverrides);
         }
 
         public void ConditionallyPrepareFrame(RenderFrame frame, ElapsedTime elapsedTime, Dictionary<int, bool> matrixVisible = null)
         {
-            SharedShape.PrepareFrame(frame, Location, XNAMatrices, Flags, matrixVisible);
+            SharedShape.PrepareFrame(frame, Location, XNAMatrices, null, Flags, matrixVisible, MaterialOverrides);
+        }
+
+        [CallOnThread("Loader")]
+        internal override void Mark()
+        {
+            base.Mark();
+            // Minimalistyczna implementacja: nie czyszczmy MaterialOverrides tutaj
+            // Każda instancja PoseableShape ma własne, w pełni izolowane materiały
         }
     }
 
@@ -904,7 +924,7 @@ namespace Orts.Viewer3D
             if (SharedShape.HasAnimations())
             {
                 var mstsOptions = AnimatedPart.MstsOptions.SpeedFromFrameCount;
-                mstsOptions |= SharedShape.MatrixNames.Contains("ANIMATED_PARTS") ? AnimatedPart.MstsOptions.MaxFrameFromFrameCount : AnimatedPart.MstsOptions.MaxFrameIsOne;
+                mstsOptions |= SharedShape.MatrixNames.Contains("ANIMATED_PARTS") ? AnimatedPart.MstsOptions.MaxFrameFromFrameOne : AnimatedPart.MstsOptions.MaxFrameIsOne;
 
                 AnimatedPart = new AnimatedPart(this);
                 AnimatedPart.AddAnimations();
@@ -1384,7 +1404,8 @@ namespace Orts.Viewer3D
 
         public ShapePrimitive(Material material, SharedShape.VertexBufferSet vertexBufferSet, IList<ushort> indexData, GraphicsDevice graphicsDevice, int[] hierarchy, int hierarchyIndex)
             : this(material, vertexBufferSet, new VertexBufferBinding[0], indexData, graphicsDevice, hierarchy, hierarchyIndex)
-        { }
+        {
+        }
 
         public ShapePrimitive(Material material, SharedShape.VertexBufferSet vertexBufferSet, VertexBufferBinding[] vertexBufferBindings, IList<ushort> indexData, GraphicsDevice graphicsDevice, int[] hierarchy, int hierarchyIndex)
             : this(material, vertexBufferSet, vertexBufferBindings, null, indexData.Count / 3, hierarchy, hierarchyIndex)
@@ -2069,7 +2090,6 @@ namespace Orts.Viewer3D
 #endif
 
 #if OPTIMIZE_SHAPES_ON_LOAD
-                    return new { Key = material.ToString() + "/" + vertexState.imatrix.ToString(), Primitive = primitive, Material = material, HierachyIndex = vertexState.imatrix };
                 }).ToArray();
 #else
                     if (primitive.indexed_trilist.vertex_idxs.Count == 0)
@@ -2280,7 +2300,7 @@ namespace Orts.Viewer3D
             PrepareFrame(frame, location, animatedXNAMatrices, null, flags, matrixVisible);
         }
 
-        public void PrepareFrame(RenderFrame frame, WorldPosition location, Matrix[] animatedXNAMatrices, bool[] subObjVisible, ShapeFlags flags, Dictionary<int, bool> matrixVisible = null)
+        public void PrepareFrame(RenderFrame frame, WorldPosition location, Matrix[] animatedXNAMatrices, bool[] subObjVisible, ShapeFlags flags, Dictionary<int, bool> matrixVisible = null, IReadOnlyDictionary<ShapePrimitive, Material> materialOverrides = null)
         {
             var lodBias = ((float)Viewer.Settings.LODBias / 100 + 1);
 
@@ -2371,10 +2391,20 @@ namespace Orts.Viewer3D
                         if (StoredResultMatrixes.ContainsKey(shapePrimitive.HierarchyIndex))
                             StoredResultMatrixes[shapePrimitive.HierarchyIndex] = xnaMatrix;
 
-                        // TODO make shadows depend on shape overrides
-
                         var interior = (flags & ShapeFlags.Interior) != 0;
-                        frame.AddAutoPrimitive(mstsLocation, distanceDetail.ViewSphereRadius, distanceDetail.ViewingDistance * lodBias, shapePrimitive.Material, shapePrimitive, interior ? RenderPrimitiveGroup.Interior : RenderPrimitiveGroup.World, ref xnaMatrix, flags);
+                        var material = materialOverrides != null && materialOverrides.TryGetValue(shapePrimitive, out var overrideMaterial)
+                            ? overrideMaterial
+                            : shapePrimitive.Material;
+
+                        frame.AddAutoPrimitive(
+                            mstsLocation,
+                            distanceDetail.ViewSphereRadius,
+                            distanceDetail.ViewingDistance * lodBias,
+                            material,
+                            shapePrimitive,
+                            interior ? RenderPrimitiveGroup.Interior : RenderPrimitiveGroup.World,
+                            ref xnaMatrix,
+                            flags);
                     }
                 }
             }
@@ -2437,7 +2467,7 @@ namespace Orts.Viewer3D
         /// <returns>Returns for stf files the node id itself, for gltf files the target node id of the animation.</returns>
         public virtual int GetAnimationTargetNode(int animationId) => animationId;
 
-        public virtual int GetAnimationNamesCount() => LodControls?.FirstOrDefault()?.DistanceLevels?.FirstOrDefault()?.SubObjects?.FirstOrDefault().ShapePrimitives?.FirstOrDefault()?.Hierarchy?.Length ?? 0;
+        public virtual int GetAnimationNamesCount() => LodControls?.FirstOrDefault()?.DistanceLevels?.FirstOrDefault()?.SubObjects?.FirstOrDefault()?.ShapePrimitives?.FirstOrDefault()?.Hierarchy?.Length ?? 0;
 
         public virtual bool HasAnimations() => Animations != null;
 

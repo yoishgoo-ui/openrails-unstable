@@ -1263,6 +1263,15 @@ namespace Orts.Simulation.Timetables
                     File.AppendAllText(@"C:\temp\checktrain.txt", "    From section : " + PoolAccessSection + "\n");
                 }
             }
+            // Ustawienie nazwy stacji docelowej
+            DestinationStationName = (StationStops != null && StationStops.Count > 0)
+                ? (StationStops[^1].PlatformItem?.Name ?? string.Empty)
+                : string.Empty;
+
+            // Ustawienie numeru linii/usługi
+            LineNumber = (TrafficService != null)
+                ? TrafficService.ToString()
+                : string.Empty;
 
             return validPosition;
         }

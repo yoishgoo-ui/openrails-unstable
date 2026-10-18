@@ -157,6 +157,8 @@ namespace Orts.Simulation.RollingStocks
         public bool ShowCab = true;
         public bool MilepostUnitsMetric;
         public int DPUnitID;
+        public int DestinationDisplayWidth = 512;
+        public int DestinationDisplayHeight = 128;
         public float DrvWheelWeightKg; // current weight on locomotive drive wheels, includes drag factor (changes as mass changes)
         public float InitialDrvWheelWeightKg; // initialising weight on locomotive drive wheels, includes drag factor
         public bool CabRadioOn;
@@ -1258,6 +1260,13 @@ namespace Orts.Simulation.RollingStocks
                 case "engine(ortscruisecontrol": SetUpCruiseControl(stf); break;
                 case "engine(ortsmultipositioncontroller": SetUpMPC(stf); break;
                 case "engine(ortsrackrailgearfactor": CogWheelGearingFactor = stf.ReadFloatBlock(STFReader.UNITS.None, null); break;
+
+                case "engine(ortsdestinationdisplay)":
+                    stf.MustMatch("(");
+                    DestinationDisplayWidth = Math.Max(16, stf.ReadIntBlock(null));
+                    DestinationDisplayHeight = Math.Max(8, stf.ReadIntBlock(null));
+                    stf.MustMatch(")");
+                    break;
 
                 default:
                     base.Parse(lowercasetoken, stf);

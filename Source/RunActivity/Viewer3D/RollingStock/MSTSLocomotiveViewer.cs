@@ -34,11 +34,12 @@ using Orts.Simulation.RollingStocks.SubSystems.Controllers;
 using Orts.Simulation.RollingStocks.SubSystems.PowerSupplies;
 using Orts.Viewer3D.Common;
 using Orts.Viewer3D.Popups;
-using Orts.Viewer3D.RollingStock.SubSystems;
 using Orts.Viewer3D.RollingStock.Subsystems.ETCS;
+using Orts.Viewer3D.RollingStock.SubSystems;
 using ORTS.Common;
 using ORTS.Common.Input;
 using ORTS.Scripting.Api;
+using static Orts.Viewer3D.SharedShape;
 using Event = Orts.Common.Event;
 
 namespace Orts.Viewer3D.RollingStock
@@ -46,9 +47,9 @@ namespace Orts.Viewer3D.RollingStock
     public class MSTSLocomotiveViewer : MSTSWagonViewer
     {
         MSTSLocomotive Locomotive;
-
+        string LastDynamicDisplayText;
         protected MSTSLocomotive MSTSLocomotive { get { return (MSTSLocomotive)Car; } }
-
+        
         public bool _hasCabRenderer;
         public bool _has3DCabRenderer;
         public CabRenderer _CabRenderer;
@@ -63,7 +64,7 @@ namespace Orts.Viewer3D.RollingStock
         public MSTSLocomotiveViewer(Viewer viewer, MSTSLocomotive car)
             : base(viewer, car)
         {
-            Locomotive = car;
+            Locomotive = car;;
 
             string wagonFolderSlash = Path.GetDirectoryName(Locomotive.WagFilePath) + "\\";
             if (Locomotive.CabSoundFileName != null) LoadCarSound(wagonFolderSlash, Locomotive.CabSoundFileName);
@@ -340,8 +341,11 @@ namespace Orts.Viewer3D.RollingStock
         /// We are about to display a video frame.  Calculate positions for 
         /// animated objects, and add their primitives to the RenderFrame list.
         /// </summary>
+        
         public override void PrepareFrame(RenderFrame frame, ElapsedTime elapsedTime)
         {
+            InitializeDynamicDisplays();
+
             if (Viewer.Camera.AttachedCar == this.MSTSWagon && Viewer.Camera.Style == Camera.Styles.ThreeDimCab)
             {
                 if (ThreeDimentionCabViewer != null)
@@ -399,7 +403,6 @@ namespace Orts.Viewer3D.RollingStock
         {
             _CabRenderer?.Mark();
             ThreeDimentionCabViewer?.Mark();
-
             base.Mark();
         }
 
@@ -855,6 +858,136 @@ namespace Orts.Viewer3D.RollingStock
             if (controller.UpdateValue >= 0)
                 controller.StopIncrease();
             else controller.StopDecrease();
+        }
+        private void InitializeDynamicDisplays()
+        {
+            var shape = TrainCarShape?.SharedShape;
+            var lodControls = shape?.LodControls;
+            if (lodControls == null)
+                return;
+
+            string trainNumber = string.Empty;
+            var rawName = Car.Train?.Name;
+
+            if (!string.IsNullOrWhiteSpace(rawName))
+            {
+                var firstSpace = rawName.IndexOf(' ');
+                string prefixAndNumber = firstSpace > 0 ? rawName.Substring(0, firstSpace).Trim() : rawName.Trim();
+
+                // Poprawka: usuwamy myślnik z numeru (np. R-80361 zamienia się na R80361)
+                trainNumber = prefixAndNumber.Replace("-", "");
+            }
+
+            if (string.IsNullOrWhiteSpace(trainNumber))
+            {
+                trainNumber = Car.Train?.Number != 0 && Car.Train?.Number != null
+                    ? Car.Train.Number.ToString()
+                    : Car.CarID;
+            }
+
+            var cleanedName = rawName;
+
+            if (!string.IsNullOrWhiteSpace(cleanedName))
+            {
+                var colonIndex = cleanedName.IndexOf(':');
+                if (colonIndex >= 0)
+                    cleanedName = cleanedName.Substring(0, colonIndex);
+
+                cleanedName = cleanedName.Trim();
+            }
+
+            string destinationText;
+            if (string.IsNullOrWhiteSpace(cleanedName))
+            {
+                destinationText = Car.CarID.ToString();
+            }
+            else
+            {
+                // Szukamy ostatniego myślnika w relacji, aby odrzucić stację początkową i zostawić tylko docelową
+                var dashIndex = cleanedName.LastIndexOf('-');
+                destinationText = (dashIndex >= 0
+                    ? cleanedName.Substring(dashIndex + 1)
+                    : cleanedName).Trim();
+
+                if (string.IsNullOrWhiteSpace(destinationText))
+                    destinationText = Car.CarID.ToString();
+            }
+
+            // Łączymy sformatowany numer (np. R80361) ze stacją docelową
+            string fullDisplayText = $"{trainNumber} {destinationText}".ToUpperInvariant();
+
+            if (string.Equals(fullDisplayText, LastDynamicDisplayText, StringComparison.Ordinal))
+                return;
+
+            var trainUniqueId = Car.Train?.GetHashCode() ?? 0;
+            var instanceUniqueId = Car.GetHashCode();
+            var safeCarId = string.Concat(Car.CarID.ToString().Where(char.IsLetterOrDigit));
+
+            // Pobranie dynamicznych wymiarów z właściwości lokomotywy (z domyślnym fallbackiem do 512x128)
+            int dispW = (Car is MSTSLocomotive loco) ? loco.DestinationDisplayWidth : 512;
+            int dispH = (Car is MSTSLocomotive loco2) ? loco2.DestinationDisplayHeight : 128;
+
+            for (var lodIndex = 0; lodIndex < lodControls.Length; lodIndex++)
+            {
+                var distanceLevels = lodControls[lodIndex]?.DistanceLevels;
+                if (distanceLevels == null)
+                    continue;
+
+                for (var levelIndex = 0; levelIndex < distanceLevels.Length; levelIndex++)
+                {
+                    var subObjects = distanceLevels[levelIndex]?.SubObjects;
+                    if (subObjects == null)
+                        continue;
+
+                    for (var subObjectIndex = 0; subObjectIndex < subObjects.Length; subObjectIndex++)
+                    {
+                        var primitives = subObjects[subObjectIndex]?.ShapePrimitives;
+                        if (primitives == null)
+                            continue;
+
+                        var primitiveIndex = 0;
+                        foreach (var primitive in primitives)
+                        {
+                            var currentPrimitiveIndex = primitiveIndex++;
+                            var originalMaterial = primitive?.Material;
+                            var materialKey = originalMaterial?.Key ?? string.Empty;
+
+                            if (originalMaterial == null
+                                || (materialKey.IndexOf("table", StringComparison.OrdinalIgnoreCase) < 0
+                                    && materialKey.IndexOf("display", StringComparison.OrdinalIgnoreCase) < 0))
+                            {
+                                continue;
+                            }
+
+                            try
+                            {
+                                var safeMaterialKey = string.Concat(materialKey.Where(char.IsLetterOrDigit));
+                                var safeDestinationText = string.Concat(fullDisplayText.Where(char.IsLetterOrDigit));
+
+                                var uniqueBaseName =
+                                    $"train_display_{trainUniqueId:X8}_{safeCarId}_{instanceUniqueId:X8}_{lodIndex}_{levelIndex}_{subObjectIndex}_{currentPrimitiveIndex}_{safeMaterialKey}_{safeDestinationText}";
+
+                                var material = TrainLabelTextureHelper.CreateLabelMaterial(
+                                 Viewer,
+                                 uniqueBaseName,
+                                 destinationText, 
+                                 trainNumber,     
+                                 originalMaterial,
+                                 dispW,
+                                 dispH);
+
+                                if (material != null && TrainCarShape != null)
+                                    TrainCarShape.SetMaterialOverride(primitive, material);
+                            }
+                            catch (Exception error)
+                            {
+                                Trace.TraceWarning($"LED display initialization failed: {error}");
+                            }
+                        }
+                    }
+                }
+            }
+            LastDynamicDisplayText = fullDisplayText;
         }
         #endregion
     } // Class LocomotiveViewer
@@ -1738,6 +1871,7 @@ namespace Orts.Viewer3D.RollingStock
 
         public override void PrepareFrame(RenderFrame frame, ElapsedTime elapsedTime)
         {
+
             var dark = Viewer.MaterialManager.sunDirection.Y <= -0.085f || Viewer.Camera.IsUnderground;
 
             Texture = CABTextureManager.GetTexture(Control.ACEFile, dark, Locomotive.CabLightOn, out IsNightTexture, HasCabLightDirectory);
@@ -4331,5 +4465,7 @@ namespace Orts.Viewer3D.RollingStock
                 SetFrameClamp(index);
             }
         }
+
     }
+
 }
